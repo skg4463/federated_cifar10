@@ -1,0 +1,154 @@
+================================================================================
+ 데이터 분할 현황
+================================================================================
+   Client  Num Samples  Class 0  Class 1  Class 2  Class 3  Class 4  Class 5  Class 6  Class 7  Class 8  Class 9
+0       0         6012      234      111      322       54      699       64     1957      877     1286      408
+1       1         4231      647      199      135      302      155      298      130      142     1720      503
+2       2         4938      166      584     1158     1585       94      568      322       52      257      152
+3       3         4851      158      120      531      223     2325      121      880       71       38      384
+4       4         5287      946     1315       45      445       61      392     1177       52      261      593
+5       5         2148     1041       38      137      147       35      304       30       45      252      119
+6       6         6483       30     1409      482      312       39       37      313     1268      469     2124
+7       7         9446      145     1071      243     1394     1017     2480       69     2250      643      134
+8       8         3940      855      118     1826      435      222      130       86      184       44       40
+9       9         2664      778       35      121      103      353      606       36       59       30      543
+
+================================================================================
+ 라운드별 글로벌 모델 평가 결과
+================================================================================
+           Loss  Accuracy       AUC
+Round                              
+1      2.815815    0.1237  0.755407
+2      1.523056    0.4494  0.893174
+3      1.162349    0.5850  0.929841
+4      0.938577    0.6677  0.950388
+5      0.895738    0.6957  0.958258
+6      0.816803    0.7282  0.964212
+7      0.780020    0.7457  0.967672
+8      0.748145    0.7622  0.969819
+9      0.797116    0.7588  0.969718
+10     0.754851    0.7677  0.972134
+
+================================================================================
+ 라운드별 개별 클라이언트 모델 성능 (통합 전)
+================================================================================
+--- Round 1 ---
+  Client 0: Accuracy=0.3639, AUC=0.8639
+  Client 1: Accuracy=0.2645, AUC=0.7730
+  Client 2: Accuracy=0.3000, AUC=0.8276
+  Client 3: Accuracy=0.2926, AUC=0.8170
+  Client 4: Accuracy=0.3290, AUC=0.8295
+  Client 5: Accuracy=0.2123, AUC=0.7815
+  Client 6: Accuracy=0.3936, AUC=0.8512
+  Client 7: Accuracy=0.3632, AUC=0.8472
+  Client 8: Accuracy=0.1787, AUC=0.7759
+  Client 9: Accuracy=0.2885, AUC=0.8071
+
+--- Round 2 ---
+  Client 0: Accuracy=0.3894, AUC=0.8728
+  Client 1: Accuracy=0.2595, AUC=0.7868
+  Client 2: Accuracy=0.3224, AUC=0.7971
+  Client 3: Accuracy=0.3053, AUC=0.8607
+  Client 4: Accuracy=0.3736, AUC=0.8692
+  Client 5: Accuracy=0.2691, AUC=0.8167
+  Client 6: Accuracy=0.4384, AUC=0.8805
+  Client 7: Accuracy=0.3804, AUC=0.8707
+  Client 8: Accuracy=0.2577, AUC=0.8448
+  Client 9: Accuracy=0.3034, AUC=0.8342
+
+--- Round 3 ---
+  Client 0: Accuracy=0.4411, AUC=0.8942
+  Client 1: Accuracy=0.4967, AUC=0.9023
+  Client 2: Accuracy=0.3108, AUC=0.8398
+  Client 3: Accuracy=0.4340, AUC=0.8997
+  Client 4: Accuracy=0.4142, AUC=0.8686
+  Client 5: Accuracy=0.4200, AUC=0.8733
+  Client 6: Accuracy=0.4395, AUC=0.8945
+  Client 7: Accuracy=0.4749, AUC=0.9041
+  Client 8: Accuracy=0.3925, AUC=0.8767
+  Client 9: Accuracy=0.3706, AUC=0.8827
+
+--- Round 4 ---
+  Client 0: Accuracy=0.4115, AUC=0.8972
+  Client 1: Accuracy=0.5290, AUC=0.9070
+  Client 2: Accuracy=0.4311, AUC=0.9046
+  Client 3: Accuracy=0.4644, AUC=0.9162
+  Client 4: Accuracy=0.4517, AUC=0.8882
+  Client 5: Accuracy=0.4574, AUC=0.8973
+  Client 6: Accuracy=0.4387, AUC=0.8848
+  Client 7: Accuracy=0.3988, AUC=0.8773
+  Client 8: Accuracy=0.3574, AUC=0.8923
+  Client 9: Accuracy=0.4409, AUC=0.9013
+
+--- Round 5 ---
+  Client 0: Accuracy=0.4405, AUC=0.9083
+  Client 1: Accuracy=0.5007, AUC=0.9165
+  Client 2: Accuracy=0.4527, AUC=0.9044
+  Client 3: Accuracy=0.4626, AUC=0.9029
+  Client 4: Accuracy=0.5341, AUC=0.9140
+  Client 5: Accuracy=0.5559, AUC=0.9231
+  Client 6: Accuracy=0.4912, AUC=0.9128
+  Client 7: Accuracy=0.5483, AUC=0.9262
+  Client 8: Accuracy=0.5466, AUC=0.9256
+  Client 9: Accuracy=0.5027, AUC=0.9192
+
+--- Round 6 ---
+  Client 0: Accuracy=0.5371, AUC=0.9252
+  Client 1: Accuracy=0.6012, AUC=0.9344
+  Client 2: Accuracy=0.4373, AUC=0.9130
+  Client 3: Accuracy=0.4925, AUC=0.9193
+  Client 4: Accuracy=0.6019, AUC=0.9343
+  Client 5: Accuracy=0.5156, AUC=0.9311
+  Client 6: Accuracy=0.5694, AUC=0.9386
+  Client 7: Accuracy=0.5458, AUC=0.9258
+  Client 8: Accuracy=0.5323, AUC=0.9243
+  Client 9: Accuracy=0.5491, AUC=0.9382
+
+--- Round 7 ---
+  Client 0: Accuracy=0.5285, AUC=0.9246
+  Client 1: Accuracy=0.6254, AUC=0.9439
+  Client 2: Accuracy=0.5447, AUC=0.9332
+  Client 3: Accuracy=0.6016, AUC=0.9364
+  Client 4: Accuracy=0.5995, AUC=0.9398
+  Client 5: Accuracy=0.5659, AUC=0.9379
+  Client 6: Accuracy=0.5610, AUC=0.9352
+  Client 7: Accuracy=0.5523, AUC=0.9199
+  Client 8: Accuracy=0.5223, AUC=0.9328
+  Client 9: Accuracy=0.5651, AUC=0.9386
+
+--- Round 8 ---
+  Client 0: Accuracy=0.6044, AUC=0.9390
+  Client 1: Accuracy=0.6569, AUC=0.9449
+  Client 2: Accuracy=0.5346, AUC=0.9309
+  Client 3: Accuracy=0.5527, AUC=0.9345
+  Client 4: Accuracy=0.6094, AUC=0.9388
+  Client 5: Accuracy=0.6026, AUC=0.9435
+  Client 6: Accuracy=0.6094, AUC=0.9414
+  Client 7: Accuracy=0.6196, AUC=0.9355
+  Client 8: Accuracy=0.5472, AUC=0.9335
+  Client 9: Accuracy=0.6149, AUC=0.9450
+
+--- Round 9 ---
+  Client 0: Accuracy=0.6548, AUC=0.9471
+  Client 1: Accuracy=0.6157, AUC=0.9437
+  Client 2: Accuracy=0.6198, AUC=0.9419
+  Client 3: Accuracy=0.5786, AUC=0.9377
+  Client 4: Accuracy=0.5743, AUC=0.9341
+  Client 5: Accuracy=0.5453, AUC=0.9335
+  Client 6: Accuracy=0.5907, AUC=0.9376
+  Client 7: Accuracy=0.5722, AUC=0.9269
+  Client 8: Accuracy=0.5494, AUC=0.9400
+  Client 9: Accuracy=0.6015, AUC=0.9474
+
+--- Round 10 ---
+  Client 0: Accuracy=0.6280, AUC=0.9461
+  Client 1: Accuracy=0.6928, AUC=0.9540
+  Client 2: Accuracy=0.6447, AUC=0.9440
+  Client 3: Accuracy=0.6390, AUC=0.9473
+  Client 4: Accuracy=0.6195, AUC=0.9412
+  Client 5: Accuracy=0.6422, AUC=0.9477
+  Client 6: Accuracy=0.6227, AUC=0.9456
+  Client 7: Accuracy=0.6031, AUC=0.9383
+  Client 8: Accuracy=0.5872, AUC=0.9430
+  Client 9: Accuracy=0.5616, AUC=0.9417
+
