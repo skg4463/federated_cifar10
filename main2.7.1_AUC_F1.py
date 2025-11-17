@@ -14,7 +14,7 @@
 #    - 데이터 포이즈닝 공격 시, 공격자 수와 오염시킬 클래스 수를 지정할 수 있습니다.
 #    - 모든 공격자가 완전히 동일한 클래스들을 공격하는 '집중 공격'을 수행합니다.
 # 4. 상세 분석 및 시각화:
-#    - 전체 정확도, 모델 통합 가중치, 오염된 클래스 정확도, 통합 정확도를 각각 그래프로 시각화합니다.
+#    - 전체 정확도, F1 Score, AUC, 모델 통합 가중치, 오염된 클래스 성능을 각각 그래프로 시각화합니다.
 #    - 라운드 수에 따라 그래프의 X축 눈금 간격을 자동으로 조절합니다.
 #    - 모든 실험 설정과 시간 측정 결과를 체계적인 폴더 구조와 로그 파일로 저장합니다.
 # 5. 실험 재현성: 랜덤 시드를 고정하여 동일한 조건에서 반복 실험 및 결과 비교가 가능합니다.
@@ -32,6 +32,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset, Dataset, ConcatDataset
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as transforms
@@ -53,6 +54,9 @@ import time
 import argparse
 import os
 from datetime import datetime
+from sklearn.metrics import f1_score, roc_auc_score, confusion_matrix
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 
 # ==============================================================================
 # 1. 하이퍼파라미터 및 설정
@@ -66,7 +70,7 @@ LEARNING_RATE = 0.01       # 모델 학습률
 
 # --- 데이터 분할 파라미터 ---
 DIRICHLET_ALPHA = 0.5      # 데이터의 Non-IID 조절 디리클레 분포 파라미터
-MIN_SAMPLES_PER_CLASS = 10 # 각 클라이언트가 클래스별로 보장받는 최소 샘플 수
+MIN_SAMPLES_PER_CLASS = 100 # 각 클라이언트가 클래스별로 보장받는 최소 샘플 수
 RANDOM_SEED = 42           # 재현 가능 실험을 위한 랜덤 시드
 
 # --- 기여도 측정 파라미터 ---
@@ -79,8 +83,10 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"학습 장치: {DEVICE}")
 
 # --- 결과 기록용 전역 변수 ---
-history = {"global_accuracy": []}
+history = {"global_accuracy": [], "global_f1": [], "global_auc": []}
 poisoned_class_accuracy_history = []
+poisoned_class_f1_history = []
+poisoned_class_auc_history = []
 aggregation_weights_history = defaultdict(list)
 time_history = defaultdict(list)
 
@@ -234,9 +240,12 @@ class DataPoisoningClient(CifarClient):
 # 4. 기여도 기반 통합 전략 (FedContrib)
 # ==============================================================================
 def evaluate_model(model: nn.Module, testloader: DataLoader, target_classes: Optional[List[int]] = None) -> Dict[str, float]:
-    """모델의 성능을 평가합니다. target_classes가 주어지면 해당 클래스에 대한 정확도만 계산합니다."""
+    """모델의 성능을 평가합니다. accuracy, F1, AUC를 모두 계산합니다."""
     model.to(DEVICE).eval()
-    correct, total = 0, 0
+    all_preds = []
+    all_labels = []
+    all_probs = []
+    
     with torch.no_grad():
         for images, labels in testloader:
             if target_classes:
@@ -247,12 +256,58 @@ def evaluate_model(model: nn.Module, testloader: DataLoader, target_classes: Opt
             
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             outputs = model(images)
-            total += labels.size(0)
-            correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
+            probs = F.softmax(outputs, dim=1)
+            
+            _, predicted = torch.max(outputs.data, 1)
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
     
-    if total == 0:
-        return {"accuracy": 0.0}
-    return {"accuracy": correct / total}
+    if len(all_labels) == 0:
+        return {"accuracy": 0.0, "f1": 0.0, "auc": 0.0}
+    
+    # Accuracy 계산
+    accuracy = sum(p == l for p, l in zip(all_preds, all_labels)) / len(all_labels)
+    
+    # F1 Score 계산 (macro average)
+    try:
+        f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    except:
+        f1 = 0.0
+    
+    # AUC 계산 (macro average, one-vs-rest)
+    try:
+        # 각 클래스별로 이진분류 AUC 계산 후 평균
+        all_probs_array = np.array(all_probs)
+        all_labels_array = np.array(all_labels)
+        
+        if target_classes:
+            # 타겟 클래스만 고려
+            unique_classes = sorted(list(set(all_labels_array)))
+        else:
+            # 전체 클래스 고려
+            unique_classes = list(range(10))
+        
+        if len(unique_classes) <= 1:
+            auc = 0.5  # 클래스가 1개 이하면 AUC 의미 없음
+        else:
+            auc_scores = []
+            for class_id in unique_classes:
+                if class_id < all_probs_array.shape[1]:  # 확률 배열 범위 체크
+                    y_true_binary = (all_labels_array == class_id).astype(int)
+                    y_prob_binary = all_probs_array[:, class_id]
+                    
+                    # 해당 클래스가 실제로 존재하는지 확인
+                    if len(np.unique(y_true_binary)) > 1:
+                        auc_class = roc_auc_score(y_true_binary, y_prob_binary)
+                        auc_scores.append(auc_class)
+            
+            auc = np.mean(auc_scores) if auc_scores else 0.5
+    except:
+        auc = 0.5
+    
+    return {"accuracy": accuracy, "f1": f1, "auc": auc}
 
 class FedContrib(FedAvg):
     def __init__(
@@ -350,16 +405,28 @@ class FedContrib(FedAvg):
         time_history["global eval time"].append(time.time() - global_eval_start)
         
         print(f"    - 전체 정확도: {global_metrics['accuracy']:.4f}")
+        print(f"    - 전체 F1 Score: {global_metrics['f1']:.4f}")
+        print(f"    - 전체 AUC: {global_metrics['auc']:.4f}")
+        
         history["global_accuracy"].append(global_metrics['accuracy'])
+        history["global_f1"].append(global_metrics['f1'])
+        history["global_auc"].append(global_metrics['auc'])
         
         if self.poisoned_classes:
             poisoned_metrics = evaluate_model(self.model_for_eval, full_test_loader, target_classes=list(self.poisoned_classes))
             poisoned_accuracy = poisoned_metrics['accuracy']
+            poisoned_f1 = poisoned_metrics['f1']
+            poisoned_auc = poisoned_metrics['auc']
+            
             poisoned_class_accuracy_history.append(poisoned_accuracy)
+            poisoned_class_f1_history.append(poisoned_f1)
+            poisoned_class_auc_history.append(poisoned_auc)
+            
             clean_poisoned_list = sorted([int(c) for c in self.poisoned_classes])
             print(f"    - 오염된 클래스({clean_poisoned_list}) 정확도: {poisoned_accuracy:.4f}")
+            print(f"    - 오염된 클래스({clean_poisoned_list}) F1 Score: {poisoned_f1:.4f}")
+            print(f"    - 오염된 클래스({clean_poisoned_list}) AUC: {poisoned_auc:.4f}")
 
-        
         total_round_duration = time.time() - round_start_time
         time_history["total time"].append(total_round_duration)
         
@@ -384,16 +451,23 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
         f.write("="*80 + "\n 데이터 분할 현황\n" + "="*80 + "\n")
         f.write(partition_report_df.to_string() + "\n\n")
         
-        f.write("="*80 + "\n 라운드별 글로벌 모델 정확도\n" + "="*80 + "\n")
-        accuracy_data = {'Overall_Accuracy': history['global_accuracy']}
+        f.write("="*80 + "\n 라운드별 글로벌 모델 성능\n" + "="*80 + "\n")
+        performance_data = {
+            'Overall_Accuracy': history['global_accuracy'],
+            'Overall_F1': history['global_f1'],
+            'Overall_AUC': history['global_auc']
+        }
+        
         if poisoned_class_accuracy_history:
             clean_poisoned_list = sorted([int(c) for c in poisoned_classes])
-            col_name = f"Poisoned_Acc({str(clean_poisoned_list).replace(' ', '')})"
-            accuracy_data[col_name] = poisoned_class_accuracy_history
+            col_prefix = f"Poisoned({str(clean_poisoned_list).replace(' ', '')})"
+            performance_data[f'{col_prefix}_Acc'] = poisoned_class_accuracy_history
+            performance_data[f'{col_prefix}_F1'] = poisoned_class_f1_history
+            performance_data[f'{col_prefix}_AUC'] = poisoned_class_auc_history
         
-        accuracy_df = pd.DataFrame(accuracy_data)
-        accuracy_df.index = pd.RangeIndex(1, len(accuracy_df) + 1, name='Round')
-        f.write(accuracy_df.to_string(float_format="{:.4f}".format) + "\n\n")
+        performance_df = pd.DataFrame(performance_data)
+        performance_df.index = pd.RangeIndex(1, len(performance_df) + 1, name='Round')
+        f.write(performance_df.to_string(float_format="{:.4f}".format) + "\n\n")
 
         f.write("="*80 + "\n 라운드별 모델 합성 가중치\n" + "="*80 + "\n")
         weights_df = pd.DataFrame(aggregation_weights_history)
@@ -447,35 +521,120 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
         rounds = range(1, len(history['global_accuracy']) + 1)
         xticks = get_xticks(len(rounds))
 
-        # 전체 정확도 그래프
-        acc_path = os.path.join(output_dir, "federated_learning_accuracy_v2.png")
-        plt.figure(figsize=(10, 6))
-        plt.plot(rounds, history['global_accuracy'], marker='o', label='Overall Accuracy')
-        plt.title("Federated Learning Performance: Accuracy Trend by Round")
-        plt.xlabel("Round")
-        plt.ylabel("Accuracy")
-        plt.grid(True); plt.xticks(xticks); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
-        plt.legend()
-        plt.savefig(acc_path)
-        print(f"'{acc_path}' 파일이 저장되었습니다.")
+        # 전체 성능 그래프 (Accuracy, F1, AUC)
+        overall_perf_path = os.path.join(output_dir, "federated_learning_overall_performance_v2.png")
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+        
+        # Accuracy
+        ax1.plot(rounds, history['global_accuracy'], marker='o', color='blue', label='Overall Accuracy')
+        ax1.set_title("Overall Accuracy Trend")
+        ax1.set_ylabel("Accuracy")
+        ax1.grid(True); ax1.set_xticks(xticks); ax1.set_yticks(np.arange(0, 1.1, 0.1)); ax1.set_ylim(0, 1)
+        ax1.legend()
+        
+        # F1 Score
+        ax2.plot(rounds, history['global_f1'], marker='s', color='green', label='Overall F1 Score')
+        ax2.set_title("Overall F1 Score Trend")
+        ax2.set_ylabel("F1 Score")
+        ax2.grid(True); ax2.set_xticks(xticks); ax2.set_yticks(np.arange(0, 1.1, 0.1)); ax2.set_ylim(0, 1)
+        ax2.legend()
+        
+        # AUC
+        ax3.plot(rounds, history['global_auc'], marker='^', color='red', label='Overall AUC')
+        ax3.set_title("Overall AUC Trend")
+        ax3.set_xlabel("Round")
+        ax3.set_ylabel("AUC")
+        ax3.grid(True); ax3.set_xticks(xticks); ax3.set_yticks(np.arange(0, 1.1, 0.1)); ax3.set_ylim(0, 1)
+        ax3.legend()
+        
+        plt.tight_layout()
+        plt.savefig(overall_perf_path)
+        print(f"'{overall_perf_path}' 파일이 저장되었습니다.")
         plt.close()
 
-        # [추가] 통합 정확도 그래프 (전체 vs 오염)
+        # 통합 성능 그래프 (모든 지표를 한 그래프에)
+        combined_perf_path = os.path.join(output_dir, "federated_learning_combined_performance_v2.png")
+        plt.figure(figsize=(12, 7))
+        plt.plot(rounds, history['global_accuracy'], marker='o', linestyle='-', label='Overall Accuracy')
+        plt.plot(rounds, history['global_f1'], marker='s', linestyle='--', label='Overall F1 Score')
+        plt.plot(rounds, history['global_auc'], marker='^', linestyle='-.', label='Overall AUC')
+        
+        plt.title("Overall Performance Metrics Comparison")
+        plt.xlabel("Round")
+        plt.ylabel("Score")
+        plt.grid(True); plt.xticks(xticks); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(combined_perf_path)
+        print(f"'{combined_perf_path}' 파일이 저장되었습니다.")
+        plt.close()
+
+        # 오염된 클래스 성능 그래프
         if poisoned_class_accuracy_history:
-            full_graph_path = os.path.join(output_dir, "federated_learning_full_graph_v2.png")
-            plt.figure(figsize=(10, 6))
-            plt.plot(rounds, history['global_accuracy'], marker='o', linestyle='-', label='Overall Accuracy')
+            poisoned_perf_path = os.path.join(output_dir, "federated_learning_poisoned_performance_v2.png")
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
             clean_poisoned_list = sorted([int(c) for c in poisoned_classes])
-            plt.plot(rounds, poisoned_class_accuracy_history, marker='x', linestyle='--', color='r', label=f'Poisoned Classes Acc ({clean_poisoned_list})')
-            plt.title("Overall vs. Poisoned Class Accuracy")
-            plt.xlabel("Round")
-            plt.ylabel("Accuracy")
-            plt.grid(True); plt.xticks(xticks); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
-            plt.legend()
-            plt.savefig(full_graph_path)
-            print(f"'{full_graph_path}' 파일이 저장되었습니다.")
+            
+            # Poisoned Accuracy
+            ax1.plot(rounds, poisoned_class_accuracy_history, marker='o', color='red', label=f'Poisoned Classes Acc ({clean_poisoned_list})')
+            ax1.set_title(f"Poisoned Classes Accuracy Trend ({clean_poisoned_list})")
+            ax1.set_ylabel("Accuracy")
+            ax1.grid(True); ax1.set_xticks(xticks); ax1.set_yticks(np.arange(0, 1.1, 0.1)); ax1.set_ylim(0, 1)
+            ax1.legend()
+            
+            # Poisoned F1
+            ax2.plot(rounds, poisoned_class_f1_history, marker='s', color='orange', label=f'Poisoned Classes F1 ({clean_poisoned_list})')
+            ax2.set_title(f"Poisoned Classes F1 Score Trend ({clean_poisoned_list})")
+            ax2.set_ylabel("F1 Score")
+            ax2.grid(True); ax2.set_xticks(xticks); ax2.set_yticks(np.arange(0, 1.1, 0.1)); ax2.set_ylim(0, 1)
+            ax2.legend()
+            
+            # Poisoned AUC
+            ax3.plot(rounds, poisoned_class_auc_history, marker='^', color='purple', label=f'Poisoned Classes AUC ({clean_poisoned_list})')
+            ax3.set_title(f"Poisoned Classes AUC Trend ({clean_poisoned_list})")
+            ax3.set_xlabel("Round")
+            ax3.set_ylabel("AUC")
+            ax3.grid(True); ax3.set_xticks(xticks); ax3.set_yticks(np.arange(0, 1.1, 0.1)); ax3.set_ylim(0, 1)
+            ax3.legend()
+            
+            plt.tight_layout()
+            plt.savefig(poisoned_perf_path)
+            print(f"'{poisoned_perf_path}' 파일이 저장되었습니다.")
             plt.close()
 
+            # 전체 vs 오염 비교 그래프
+            comparison_path = os.path.join(output_dir, "federated_learning_overall_vs_poisoned_v2.png")
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+            
+            # Accuracy 비교
+            ax1.plot(rounds, history['global_accuracy'], marker='o', linestyle='-', label='Overall Accuracy')
+            ax1.plot(rounds, poisoned_class_accuracy_history, marker='x', linestyle='--', color='r', label=f'Poisoned Classes Acc ({clean_poisoned_list})')
+            ax1.set_title("Overall vs. Poisoned Classes Accuracy")
+            ax1.set_ylabel("Accuracy")
+            ax1.grid(True); ax1.set_xticks(xticks); ax1.set_yticks(np.arange(0, 1.1, 0.1)); ax1.set_ylim(0, 1)
+            ax1.legend()
+            
+            # F1 비교
+            ax2.plot(rounds, history['global_f1'], marker='s', linestyle='-', label='Overall F1 Score')
+            ax2.plot(rounds, poisoned_class_f1_history, marker='x', linestyle='--', color='orange', label=f'Poisoned Classes F1 ({clean_poisoned_list})')
+            ax2.set_title("Overall vs. Poisoned Classes F1 Score")
+            ax2.set_ylabel("F1 Score")
+            ax2.grid(True); ax2.set_xticks(xticks); ax2.set_yticks(np.arange(0, 1.1, 0.1)); ax2.set_ylim(0, 1)
+            ax2.legend()
+            
+            # AUC 비교
+            ax3.plot(rounds, history['global_auc'], marker='^', linestyle='-', label='Overall AUC')
+            ax3.plot(rounds, poisoned_class_auc_history, marker='x', linestyle='--', color='purple', label=f'Poisoned Classes AUC ({clean_poisoned_list})')
+            ax3.set_title("Overall vs. Poisoned Classes AUC")
+            ax3.set_xlabel("Round")
+            ax3.set_ylabel("AUC")
+            ax3.grid(True); ax3.set_xticks(xticks); ax3.set_yticks(np.arange(0, 1.1, 0.1)); ax3.set_ylim(0, 1)
+            ax3.legend()
+            
+            plt.tight_layout()
+            plt.savefig(comparison_path)
+            print(f"'{comparison_path}' 파일이 저장되었습니다.")
+            plt.close()
 
     if aggregation_weights_history:
         weights_path = os.path.join(output_dir, "federated_learning_weights_v2.png")
@@ -497,27 +656,6 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
         plt.savefig(weights_path)
         print(f"'{weights_path}' 파일이 저장되었습니다.")
         plt.close()
-
-    if poisoned_class_accuracy_history:
-        poison_acc_path = os.path.join(output_dir, "federated_learning_poisoned_accuracy_v2.png")
-        plt.figure(figsize=(10, 6))
-        rounds_poisoned = range(1, len(poisoned_class_accuracy_history) + 1)
-        xticks_poisoned = get_xticks(len(rounds_poisoned))
-        clean_poisoned_list = sorted([int(c) for c in poisoned_classes])
-        plt.plot(rounds_poisoned, poisoned_class_accuracy_history, marker='o', color='r', label=f'Poisoned Classes Acc ({clean_poisoned_list})')
-        
-        num_df = args.df[0] if args.df else 0
-        poison_level = args.df[1] if args.df and len(args.df) > 1 else 1
-        title = f"Accuracy on Poisoned Classes\n(Attack: {num_df} nodes, {poison_level} labels each)"
-        plt.title(title)
-        plt.xlabel("Round")
-        plt.ylabel("Accuracy")
-        plt.grid(True); plt.xticks(xticks_poisoned); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
-        plt.legend()
-        plt.savefig(poison_acc_path)
-        print(f"'{poison_acc_path}' 파일이 저장되었습니다.")
-        plt.close()
-
 
 # ==============================================================================
 # 6. 연합학습 시뮬레이션 실행
@@ -546,7 +684,7 @@ def main():
     output_dir = f"{timestamp}_v2.7_R{NUM_ROUNDS}{options_str}"
     os.makedirs(output_dir, exist_ok=True)
     
-    print("=" * 80, "\n버전 2.6: 기여도 기반 연합학습 시뮬레이션을 시작합니다.\n", "=" * 80)
+    print("=" * 80, "\n버전 2.7: 기여도 기반 연합학습 시뮬레이션을 시작합니다.\n", "=" * 80)
     
     train_subsets, committee_test_loaders, partition_report_df = prepare_datasets()
     

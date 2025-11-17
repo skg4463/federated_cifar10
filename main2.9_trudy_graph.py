@@ -1,7 +1,7 @@
 # ==============================================================================
 # 코드 버전 및 기능 요약
 # ==============================================================================
-# 버전: 2.7
+# 버전: 2.10
 #
 # 주요 기능:
 # 1. 기여도 기반 연합학습: 독립된 '위원회(Committee)'가 각 노드의 성능을 평가하고,
@@ -9,11 +9,13 @@
 # 2. 악의적 노드 시뮬레이션:
 #    - 랜덤 노이즈 공격 (--ns): 무작위 파라미터를 제출하여 학습을 방해합니다.
 #    - 데이터 포이즈닝 공격 (--df): 데이터 라벨을 조작하여 특정 클래스의 성능을 저하시킵니다.
-#    - 공격자 수와 오염시킬 클래스 수를 지정할 수 있습니다.   
 # 3. 공격 강도 및 방식 조절:
 #    - 데이터 포이즈닝 공격 시, 공격자 수와 오염시킬 클래스 수를 지정할 수 있습니다.
 #    - 모든 공격자가 완전히 동일한 클래스들을 공격하는 '집중 공격'을 수행합니다.
 # 4. 상세 분석 및 시각화:
+#    - [신규] 모델 궤적 지도 시각화: --s 옵션 사용 시, 발산이 극심한 순간의 정상/공격자
+#      노드의 모델 업데이트 방향과 크기를 화살표 그래프로 시각화합니다.
+#    - 정확도 발산 분석: 정확도가 가장 크게 변동한 순간의 가중치를 막대그래프로 시각화합니다.
 #    - 전체 정확도, 모델 통합 가중치, 오염된 클래스 정확도, 통합 정확도를 각각 그래프로 시각화합니다.
 #    - 라운드 수에 따라 그래프의 X축 눈금 간격을 자동으로 조절합니다.
 #    - 모든 실험 설정과 시간 측정 결과를 체계적인 폴더 구조와 로그 파일로 저장합니다.
@@ -21,11 +23,6 @@
 # 6. 유연한 실행 옵션:
 #    - --s: 위원회 평가를 건너뛰어 빠른 테스트를 진행할 수 있습니다.
 #    - --csf [F]: 기여도 점수 차이를 증폭시키는 배수를 설정합니다. (기본값: 1.0)
-#
-# 명령어: python mainv2.7.py --ns 2 --df 2 1 --s --csf 1.5
-#  (노이즈 공격자 2명, 데이터포이즈닝 공격자 2명(각각 1개 클래스 오염), 위원회 평가 건너뛰기(일반연합학습), 기여도 증폭 배수 1.5)
-# 명령어: python mainv2.7.py --ns 0 --df 3 2 --csf 2.0
-#  (노이즈 공격자 없음, 데이터포이즈닝 공격자 3명(각각 2개 클래스 오염), 위원회 평가 수행(블록체인연합학습), 기여도 증폭 배수 2.0)
 # ==============================================================================
 
 
@@ -53,6 +50,8 @@ import time
 import argparse
 import os
 from datetime import datetime
+import pytz
+from sklearn.decomposition import PCA
 
 # ==============================================================================
 # 1. 하이퍼파라미터 및 설정
@@ -65,14 +64,14 @@ LOCAL_EPOCHS = 2           # 각 클라이언트가 라운드마다 수행하는
 LEARNING_RATE = 0.01       # 모델 학습률
 
 # --- 데이터 분할 파라미터 ---
-DIRICHLET_ALPHA = 0.5      # 데이터의 Non-IID 조절 디리클레 분포 파라미터
-MIN_SAMPLES_PER_CLASS = 10 # 각 클라이언트가 클래스별로 보장받는 최소 샘플 수
-RANDOM_SEED = 42           # 재현 가능 실험을 위한 랜덤 시드
+DIRICHLET_ALPHA = 0.5      # 데이터의 Non-IID 정도를 조절하는 디리클레 분포 파라미터
+MIN_SAMPLES_PER_CLASS = 100 # 각 클라이언트가 클래스별로 보장받는 최소 샘플 수
+RANDOM_SEED = 42           # 재현 가능한 실험을 위한 랜덤 시드
 
-# --- 기여도 측정 파라미터 ---
-NUM_COMMITTEE_MEMBERS = 3  # 학습 노드의 성능을 평가할 Committee의 수
-EWMA_BETA = 0.3            # 지수가중이동평균(EWMA) 반영률 조정 파라미터
-CONTRIBUTION_SCALING_FACTOR = 1.5 # 기여도 증폭 배수
+# --- 버전 2: 기여도 측정 파라미터 ---
+NUM_COMMITTEE_MEMBERS = 3  # 학습 노드의 성능을 평가할 위원회(Committee)의 수
+EWMA_BETA = 0.3            # 정확도를 보정할 지수가중이동평균(EWMA)의 반영률 조정 파라미터
+CONTRIBUTION_SCALING_FACTOR = 1.5 # 기여도 점수 차이를 증폭시키는 배수 (1.0 이상 권장)
 
 # --- 시스템 설정 ---
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -83,6 +82,8 @@ history = {"global_accuracy": []}
 poisoned_class_accuracy_history = []
 aggregation_weights_history = defaultdict(list)
 time_history = defaultdict(list)
+model_params_history = {}
+global_params_history = {} # [신규] 라운드 시작 시점의 글로벌 모델 파라미터를 저장하기 위한 변수
 
 # ==============================================================================
 # 2. 데이터셋 준비
@@ -273,6 +274,15 @@ class FedContrib(FedAvg):
         self.ewma_scores = defaultdict(float)
         self.poisoned_classes = poisoned_classes if poisoned_classes else set()
 
+    # [수정] configure_fit을 오버라이드하여 라운드 시작 시점의 글로벌 모델을 저장합니다.
+    def configure_fit(
+        self, server_round: int, parameters: fl.common.Parameters, client_manager: fl.server.client_manager.ClientManager
+    ) -> List[Tuple[fl.server.client_proxy.ClientProxy, fl.common.FitIns]]:
+        """클라이언트 학습 설정을 구성하고, 시작 시점의 글로벌 모델을 저장합니다."""
+        if self.skip_committee_eval:
+            global_params_history[server_round] = parameters_to_ndarrays(parameters)
+        return super().configure_fit(server_round, parameters, client_manager)
+
     def aggregate_fit(
         self,
         server_round: int,
@@ -287,6 +297,14 @@ class FedContrib(FedAvg):
             cid = fit_res.metrics.get("cid", "unknown")
             duration = fit_res.metrics.get("fit_duration", 0)
             time_history[f"cli {cid} train"].append(duration)
+
+        # [수정] --s 옵션 사용 시, 모델 가중치 발산 분석을 위해 파라미터를 저장합니다.
+        if self.skip_committee_eval:
+            params_for_round = {}
+            for _, fit_res in results:
+                cid = fit_res.metrics.get("cid", "unknown")
+                params_for_round[cid] = parameters_to_ndarrays(fit_res.parameters)
+            model_params_history[server_round] = params_for_round
 
         print("\n" + "-"*80)
         print(f"** 라운드 {server_round}: 모델 통합 및 평가 **")
@@ -376,7 +394,82 @@ class FedContrib(FedAvg):
 # ==============================================================================
 # 5. 결과 저장 및 시각화
 # ==============================================================================
-def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[int]):
+# [신규] 모델 궤적 지도 시각화 함수
+def visualize_model_trajectories(output_dir, round_num_drop, round_num_rise, ns_ids, df_ids):
+    """PCA를 사용하여 두 결정적인 라운드의 모델 궤적을 시각화합니다."""
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9))
+    
+    # --- 1. 정확도 급락 시점 분석 ---
+    if round_num_drop in model_params_history and round_num_drop in global_params_history:
+        start_global_params = global_params_history[round_num_drop]
+        end_client_params = model_params_history[round_num_drop]
+        
+        # 데이터 준비
+        all_params = [start_global_params] + list(end_client_params.values())
+        all_vectors = [np.concatenate([p.flatten() for p in params]) for params in all_params]
+        
+        # PCA 수행
+        pca = PCA(n_components=2, random_state=RANDOM_SEED)
+        transformed = pca.fit_transform(all_vectors)
+        
+        start_point = transformed[0]
+        client_points = transformed[1:]
+        client_ids = list(end_client_params.keys())
+        
+        # 시각화
+        for i, (x, y) in enumerate(client_points):
+            cid = client_ids[i]
+            color = 'red' if cid in ns_ids or cid in df_ids else 'blue'
+            ax1.arrow(start_point[0], start_point[1], x - start_point[0], y - start_point[1],
+                      head_width=0.05, length_includes_head=True, color=color, alpha=0.7)
+            ax1.text(x, y, f" C{cid}", fontsize=9)
+
+        ax1.scatter(start_point[0], start_point[1], color='green', s=200, marker='o', zorder=5, label="Start Global Model")
+        ax1.set_title(f"Accuracy Drop (R{round_num_drop-1} -> R{round_num_drop})", fontsize=14)
+        ax1.set_xlabel("Principal Component 1"); ax1.set_ylabel("Principal Component 2")
+        ax1.grid(True); ax1.legend()
+        ax1.plot([], [], ' ', label=f'Explained Variance: {pca.explained_variance_ratio_.sum()*100:.2f}%')
+        ax1.legend()
+
+    # --- 2. 정확도 급상승 시점 분석 ---
+    if round_num_rise in model_params_history and round_num_rise in global_params_history:
+        start_global_params = global_params_history[round_num_rise]
+        end_client_params = model_params_history[round_num_rise]
+        
+        all_params = [start_global_params] + list(end_client_params.values())
+        all_vectors = [np.concatenate([p.flatten() for p in params]) for params in all_params]
+        
+        pca = PCA(n_components=2, random_state=RANDOM_SEED)
+        transformed = pca.fit_transform(all_vectors)
+        
+        start_point = transformed[0]
+        client_points = transformed[1:]
+        client_ids = list(end_client_params.keys())
+
+        for i, (x, y) in enumerate(client_points):
+            cid = client_ids[i]
+            color = 'red' if cid in ns_ids or cid in df_ids else 'blue'
+            ax2.arrow(start_point[0], start_point[1], x - start_point[0], y - start_point[1],
+                      head_width=0.05, length_includes_head=True, color=color, alpha=0.7)
+            ax2.text(x, y, f" C{cid}", fontsize=9)
+
+        ax2.scatter(start_point[0], start_point[1], color='green', s=200, marker='o', zorder=5, label="Start Global Model")
+        ax2.set_title(f"Accuracy Rise (R{round_num_rise-1} -> R{round_num_rise})", fontsize=14)
+        ax2.set_xlabel("Principal Component 1"); ax2.grid(True); ax2.legend()
+        ax2.plot([], [], ' ', label=f'Explained Variance: {pca.explained_variance_ratio_.sum()*100:.2f}%')
+        ax2.legend()
+    
+    fig.suptitle('Model Trajectory Map: Direction and Magnitude of Client Updates', fontsize=18)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    filepath = os.path.join(output_dir, f"federated_learning_trajectory_map_v2.png")
+    plt.savefig(filepath)
+    plt.close()
+    print(f"'{filepath}' 파일이 저장되었습니다.")
+
+
+def save_results(output_dir, partition_report_df, args, ns_ids: Set[str], df_ids: Set[str], poisoned_classes: Set[int]):
     print(f"\n[결과 저장] 학습 결과를 '{output_dir}' 폴더에 저장하는 중...")
     
     results_filepath = os.path.join(output_dir, "federated_learning_results_v2.txt")
@@ -429,7 +522,7 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
 
     print(f"'{results_filepath}' 파일이 저장되었습니다.")
     
-    # --- [수정] X축 눈금 간격을 동적으로 조절하는 로직 ---
+    # --- X축 눈금 간격을 동적으로 조절하는 로직 ---
     def get_xticks(total_rounds):
         if total_rounds > 100:
             step = 10
@@ -439,8 +532,8 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
             return list(range(1, total_rounds + 1))
         
         ticks = list(range(step, total_rounds + 1, step))
-        if 1 not in ticks:
-            ticks.insert(0, 1)
+        if 1 not in ticks: ticks.insert(0, 1)
+        if total_rounds not in ticks: ticks.append(total_rounds)
         return ticks
 
     if history['global_accuracy']:
@@ -452,15 +545,13 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
         plt.figure(figsize=(10, 6))
         plt.plot(rounds, history['global_accuracy'], marker='o', label='Overall Accuracy')
         plt.title("Federated Learning Performance: Accuracy Trend by Round")
-        plt.xlabel("Round")
-        plt.ylabel("Accuracy")
+        plt.xlabel("Round"); plt.ylabel("Accuracy")
         plt.grid(True); plt.xticks(xticks); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
         plt.legend()
-        plt.savefig(acc_path)
+        plt.savefig(acc_path); plt.close()
         print(f"'{acc_path}' 파일이 저장되었습니다.")
-        plt.close()
-
-        # [추가] 통합 정확도 그래프 (전체 vs 오염)
+        
+        # 통합 정확도 그래프 (전체 vs 오염)
         if poisoned_class_accuracy_history:
             full_graph_path = os.path.join(output_dir, "federated_learning_full_graph_v2.png")
             plt.figure(figsize=(10, 6))
@@ -468,13 +559,11 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
             clean_poisoned_list = sorted([int(c) for c in poisoned_classes])
             plt.plot(rounds, poisoned_class_accuracy_history, marker='x', linestyle='--', color='r', label=f'Poisoned Classes Acc ({clean_poisoned_list})')
             plt.title("Overall vs. Poisoned Class Accuracy")
-            plt.xlabel("Round")
-            plt.ylabel("Accuracy")
+            plt.xlabel("Round"); plt.ylabel("Accuracy")
             plt.grid(True); plt.xticks(xticks); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
             plt.legend()
-            plt.savefig(full_graph_path)
+            plt.savefig(full_graph_path); plt.close()
             print(f"'{full_graph_path}' 파일이 저장되었습니다.")
-            plt.close()
 
 
     if aggregation_weights_history:
@@ -484,19 +573,16 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
         rounds_weights = range(1, len(weights_df) + 1)
         xticks_weights = get_xticks(len(rounds_weights))
         for col in weights_df.columns:
-            client_id = col.split('_')[1]
-            plt.plot(weights_df.index + 1, weights_df[col], marker='o', linestyle='--', markersize=4, label=f'Client {client_id}')
+            client_id_str = col.split('_')[1]
+            color = 'red' if client_id_str in ns_ids or client_id_str in df_ids else 'blue'
+            plt.plot(weights_df.index + 1, weights_df[col], marker='o', linestyle='--', markersize=4, label=f'Client {client_id_str}', color=color)
         
         plt.title("Changes in Normalized Aggregation Weights per Round")
-        plt.xlabel("Round")
-        plt.ylabel("Normalized Weight")
-        plt.grid(True)
-        plt.xticks(xticks_weights)
+        plt.xlabel("Round"); plt.ylabel("Normalized Weight")
+        plt.grid(True); plt.xticks(xticks_weights)
         plt.legend(title="Clients", loc='upper left', bbox_to_anchor=(1, 1))
-        plt.tight_layout()
-        plt.savefig(weights_path)
+        plt.tight_layout(); plt.savefig(weights_path); plt.close()
         print(f"'{weights_path}' 파일이 저장되었습니다.")
-        plt.close()
 
     if poisoned_class_accuracy_history:
         poison_acc_path = os.path.join(output_dir, "federated_learning_poisoned_accuracy_v2.png")
@@ -509,21 +595,66 @@ def save_results(output_dir, partition_report_df, args, poisoned_classes: Set[in
         num_df = args.df[0] if args.df else 0
         poison_level = args.df[1] if args.df and len(args.df) > 1 else 1
         title = f"Accuracy on Poisoned Classes\n(Attack: {num_df} nodes, {poison_level} labels each)"
-        plt.title(title)
-        plt.xlabel("Round")
-        plt.ylabel("Accuracy")
+        plt.title(title); plt.xlabel("Round"); plt.ylabel("Accuracy")
         plt.grid(True); plt.xticks(xticks_poisoned); plt.yticks(np.arange(0, 1.1, 0.1)); plt.ylim(0, 1)
-        plt.legend()
-        plt.savefig(poison_acc_path)
+        plt.legend(); plt.savefig(poison_acc_path); plt.close()
         print(f"'{poison_acc_path}' 파일이 저장되었습니다.")
-        plt.close()
+        
+    # --- 가중치 기반 발산 분석 그래프 ---
+    if not args.s and len(history['global_accuracy']) > 1:
+        divergence_path = os.path.join(output_dir, "federated_learning_divergence_weights_v2.png")
+        acc_diffs = np.diff(history['global_accuracy'])
+        
+        if len(acc_diffs) > 1:
+            acc_diffs_after_R1 = acc_diffs[1:]
+            drop_round_idx = np.argmin(acc_diffs_after_R1)
+            rise_round_idx = np.argmax(acc_diffs_after_R1)
+            sharpest_drop_round = drop_round_idx + 2
+            sharpest_rise_round = rise_round_idx + 2
+            
+            weights_df = pd.DataFrame(aggregation_weights_history)
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+            
+            drop_weights = weights_df.iloc[sharpest_drop_round - 1]
+            clients = [f"C{i}" for i in range(NUM_CLIENTS)]
+            colors_drop = ['red' if str(i) in ns_ids or str(i) in df_ids else 'blue' for i in range(NUM_CLIENTS)]
+            ax1.bar(clients, drop_weights, color=colors_drop)
+            ax1.set_title(f"Weights at Sharpest Accuracy Drop\n(R{sharpest_drop_round-1} -> R{sharpest_drop_round}, Diff: {acc_diffs_after_R1[drop_round_idx]:.3f})")
+            ax1.set_ylabel("Normalized Weight")
+            
+            rise_weights = weights_df.iloc[sharpest_rise_round - 1]
+            colors_rise = ['red' if str(i) in ns_ids or str(i) in df_ids else 'blue' for i in range(NUM_CLIENTS)]
+            ax2.bar(clients, rise_weights, color=colors_rise)
+            ax2.set_title(f"Weights at Sharpest Accuracy Rise\n(R{sharpest_rise_round-1} -> R{sharpest_rise_round}, Diff: {acc_diffs_after_R1[rise_round_idx]:.3f})")
+            
+            fig.suptitle('Contribution Analysis: Weights at Critical Moments', fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.savefig(divergence_path); plt.close()
+            print(f"'{divergence_path}' 파일이 저장되었습니다.")
+
+    # --- [수정] 모델 궤적 지도 시각화 호출 로직 ---
+    if args.s and len(history['global_accuracy']) > 1 and model_params_history:
+        acc_diffs = np.diff(history['global_accuracy'])
+        if len(acc_diffs) > 1:
+            acc_diffs_after_R1 = acc_diffs[1:]
+            drop_round_idx = np.argmin(acc_diffs_after_R1)
+            rise_round_idx = np.argmax(acc_diffs_after_R1)
+            sharpest_drop_round = drop_round_idx + 2
+            sharpest_rise_round = rise_round_idx + 2
+
+            visualize_model_trajectories(
+                output_dir,
+                sharpest_drop_round,
+                sharpest_rise_round,
+                ns_ids, df_ids
+            )
 
 
 # ==============================================================================
 # 6. 연합학습 시뮬레이션 실행
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="버전 2.7: 기여도 및 악의적 노드 시뮬레이션")
+    parser = argparse.ArgumentParser(description="버전 2.9: 기여도 및 악의적 노드 시뮬레이션")
     parser.add_argument("--s", action="store_true", help="위원회 평가 스킵")
     parser.add_argument("--ns", type=int, nargs='?', const=1, default=0, metavar='N', help="랜덤 노이즈 공격자 수")
     parser.add_argument("--df", type=int, nargs='+', metavar=('N_ATTACKERS', 'N_CLASSES'), help="데이터 포이즈닝 공격자 수 및 오염 클래스 수")
@@ -531,7 +662,8 @@ def main():
     args = parser.parse_args()
     
     # --- 결과 저장 폴더 생성 ---
-    now = datetime.now()
+    kst = pytz.timezone('Asia/Seoul')
+    now = datetime.now(kst)
     timestamp = now.strftime("%m%d_%H%M")
     options_list = []
     if args.ns > 0: options_list.append(f"ns{args.ns}")
@@ -543,10 +675,10 @@ def main():
     if args.csf != 1.0: options_list.append(f"csf{args.csf}")
     options_list.append(f"ew{EWMA_BETA}")
     options_str = f"_[{','.join(options_list)}]" if options_list else ""
-    output_dir = f"{timestamp}_v2.7_R{NUM_ROUNDS}{options_str}"
+    output_dir = f"{timestamp}_v2.9_R{NUM_ROUNDS}{options_str}"
     os.makedirs(output_dir, exist_ok=True)
     
-    print("=" * 80, "\n버전 2.6: 기여도 기반 연합학습 시뮬레이션을 시작합니다.\n", "=" * 80)
+    print("=" * 80, f"\n버전 2.9: 기여도 기반 연합학습 시뮬레이션을 시작합니다.\n{'='*80}")
     
     train_subsets, committee_test_loaders, partition_report_df = prepare_datasets()
     
@@ -558,7 +690,7 @@ def main():
     # --- 악의적인 노드 ID 및 오염 클래스 설정 ---
     num_ns = args.ns
     num_df = args.df[0] if args.df else 0
-    poison_level = args.df[1] if args.df and len(args.df) > 1 else 1
+    poison_level = args.df[1] if args.df and len(args.df) > 1 else (1 if num_df > 0 else 0)
     
     total_malicious = num_ns + num_df
     client_ids_str = [str(i) for i in range(NUM_CLIENTS)]
@@ -570,12 +702,33 @@ def main():
     if df_ids:
         np.random.seed(RANDOM_SEED)
         all_classes = list(range(10))
-        source_classes = np.random.choice(all_classes, poison_level, replace=False)
+        # [수정] 모든 공격자가 공유할 '공동 공격 목표'를 생성합니다.
+        # 1. 공격할 총 클래스 수를 계산합니다. (예: 3명*3레벨=9개)
+        num_total_poison_classes = num_df * poison_level
         
-        for source in source_classes:
-            target_options = [c for c in all_classes if c != source]
-            shared_poison_map[source] = np.random.choice(target_options)
+        # 2. 겹치지 않는 공격 소스-타겟 쌍을 만듭니다.
+        available_sources = list(range(10))
+        np.random.shuffle(available_sources)
+        
+        temp_poison_map = {}
+        # 공격 레벨만큼 각 공격자에게 다른 공격 목표를 할당
+        for i in range(num_df):
+            start_idx = i * poison_level
+            end_idx = start_idx + poison_level
+            if end_idx > len(available_sources): break # 사용할 클래스가 모자라면 중단
 
+            poison_sources_for_client = available_sources[start_idx:end_idx]
+
+            for source in poison_sources_for_client:
+                 # 타겟은 소스와 겹치지 않게, 그리고 다른 공격의 타겟과도 겹치지 않게 선택
+                target_options = [c for c in all_classes if c != source and c not in temp_poison_map.values()]
+                if not target_options: # 선택할 타겟이 없으면 남은 것 중 아무거나
+                    target_options = [c for c in all_classes if c != source]
+                
+                temp_poison_map[source] = np.random.choice(target_options)
+
+        shared_poison_map = temp_poison_map
+    
     poisoned_classes_to_track = set(shared_poison_map.keys())
 
     if ns_ids: print(f"[설정] 노이즈 공격 노드 수: {len(ns_ids)}개, ID: {sorted(list(ns_ids))}")
@@ -600,7 +753,6 @@ def main():
         poisoned_classes=poisoned_classes_to_track,
         scaling_factor=args.csf,
         fraction_fit=1.0,
-        fraction_evaluate=0.0, # flower 클라이언트 레벨 정확도 평가 스킵
         min_fit_clients=NUM_CLIENTS,
         min_available_clients=NUM_CLIENTS,
         evaluate_fn=None,
@@ -621,7 +773,7 @@ def main():
         total_time = time.time() - simulation_start_time
         print("\n" + "=" * 80, f"\n연합학습 시뮬레이션 종료. (총 소요 시간: {total_time:.2f}초)\n", "=" * 80)
         if history["global_accuracy"]:
-            save_results(output_dir, partition_report_df, args, poisoned_classes_to_track)
+            save_results(output_dir, partition_report_df, args, ns_ids, df_ids, poisoned_classes_to_track)
         else:
             print("[알림] 학습이 완료되기 전에 종료되어 저장할 결과가 없습니다.")
 
