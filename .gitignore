@@ -5,6 +5,7 @@ ENV/
 .venv/
 .env/
 
+
 # Python
 __pycache__/
 *.py[cod]
@@ -115,6 +116,8 @@ temp/
 tmp/
 
 # Large result directories (실험 결과 폴더들 - 필요에 따라 주석 처리/해제)
-# 0*/
+0*/
+1*/
+data/
 # ex*/
 # v2_ex*/
